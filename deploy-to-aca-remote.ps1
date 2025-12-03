@@ -1,6 +1,9 @@
-# deploy-to-aca.ps1
+# deploy-to-aca-remote.ps1
+# This script forces a REMOTE build using Azure Container Registry Tasks (az acr build).
+# It does NOT require local Docker, but requires ACR Tasks to be allowed in your subscription.
+
 param (
-    [string]$ResourceGroup = "rg-weatherapi-prod-new",
+    [string]$ResourceGroup = "rg-weatherapi-prod",
     [string]$Location      = "eastus",
     [string]$AppName       = "weatherapi",
     [string]$AcrName       = ""
@@ -13,7 +16,7 @@ function Get-Timestamp { return Get-Date -Format "yyyyMMddHHmm" }
 
 # --- Main Script ---
 
-Write-Host "Starting deployment for $AppName in $ResourceGroup ($Location)..." -ForegroundColor Cyan
+Write-Host "Starting REMOTE deployment for $AppName in $ResourceGroup ($Location)..." -ForegroundColor Cyan
 
 # 1. Login to Azure
 Write-Host "Checking Azure login..." -ForegroundColor Gray
@@ -32,7 +35,6 @@ az provider register --namespace Microsoft.OperationalInsights --wait --output n
 # 3. Create Resource Group
 Write-Host "Ensuring Resource Group $ResourceGroup exists..." -ForegroundColor Gray
 az group create --name $ResourceGroup --location $Location --output none
-if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create/check Resource Group $ResourceGroup"; exit 1 }
 
 # 4. Handle ACR (Idempotency)
 if ([string]::IsNullOrEmpty($AcrName)) {
@@ -47,7 +49,6 @@ if ([string]::IsNullOrEmpty($AcrName)) {
         $AcrName = "weatherapi$random".ToLower()
         Write-Host "No existing ACR found. Creating new ACR: $AcrName" -ForegroundColor Yellow
         az acr create --resource-group $ResourceGroup --name $AcrName --sku Basic --admin-enabled true --output none
-        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create ACR $AcrName"; exit 1 }
     }
 } else {
     Write-Host "Using provided ACR: $AcrName" -ForegroundColor Cyan
@@ -55,36 +56,26 @@ if ([string]::IsNullOrEmpty($AcrName)) {
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ACR $AcrName does not exist. Creating..." -ForegroundColor Yellow
         az acr create --resource-group $ResourceGroup --name $AcrName --sku Basic --admin-enabled true --output none
-        if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create ACR $AcrName"; exit 1 }
     }
 }
 
-# Login to ACR
+# Login to ACR (needed for some operations, though az acr build handles auth internally usually)
 az acr login --name $AcrName
-if ($LASTEXITCODE -ne 0) { Write-Error "Failed to login to ACR $AcrName"; exit 1 }
 
-# 5. Build and Push Image (Local Docker vs ACR Build)
+# 5. Build and Push Image (REMOTE ONLY)
 $timestamp = Get-Timestamp
 $imageTag  = "$AcrName.azurecr.io/$($AppName):$timestamp"
 $latestTag = "$AcrName.azurecr.io/$($AppName):latest"
 
-Write-Host "Preparing to build image..." -ForegroundColor Green
-if (Get-Command "docker" -ErrorAction SilentlyContinue) {
-    Write-Host "Local Docker detected. Using local build..." -ForegroundColor Cyan
+Write-Host "Triggering REMOTE build in ACR (az acr build)..." -ForegroundColor Magenta
+Write-Host "  - $imageTag" -ForegroundColor Gray
+Write-Host "  - $latestTag" -ForegroundColor Gray
 
-    # Build
-    docker build -t $imageTag -t $latestTag .
-    if ($LASTEXITCODE -ne 0) { Write-Error "Docker build failed"; exit 1 }
-
-    # Push
-    Write-Host "Pushing images to ACR..." -ForegroundColor Cyan
-    docker push $imageTag
-    docker push $latestTag
-    if ($LASTEXITCODE -ne 0) { Write-Error "Docker push failed"; exit 1 }
-
-} else {
-    Write-Warning "Docker not found locally. Falling back to 'az acr build' (may fail if Tasks are blocked)..."
-    az acr build --registry $AcrName --image $imageTag --image $latestTag --file Dockerfile .
+# Force remote build
+az acr build --registry $AcrName --image $imageTag --image $latestTag --file Dockerfile .
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Remote build failed. ACR Tasks might be blocked on this registry/subscription."
+    exit 1
 }
 
 # 6. Get ACR Credentials
@@ -96,7 +87,6 @@ $acrPassword = $cred.passwords[0].value
 $EnvName = "$AppName-env"
 Write-Host "Ensuring Container Apps Environment $EnvName..." -ForegroundColor Green
 az containerapp env create --name $EnvName --resource-group $ResourceGroup --location $Location --output none
-if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create Container Apps Environment $EnvName"; exit 1 }
 
 # Wait for provisioning
 Write-Host "Waiting for environment to be ready..." -ForegroundColor Yellow
