@@ -17,8 +17,8 @@ Write-Host "Starting deployment for $AppName in $ResourceGroup ($Location)..." -
 
 # 1. Login to Azure
 Write-Host "Checking Azure login..." -ForegroundColor Gray
-az account show --output none 2>$null
-if ($LASTEXITCODE -ne 0) {
+$currentSub = az account list --query "[?isDefault].id" -o tsv
+if ([string]::IsNullOrEmpty($currentSub)) {
     Write-Host "Please login to Azure..." -ForegroundColor Yellow
     az login
 }
@@ -51,8 +51,8 @@ if ([string]::IsNullOrEmpty($AcrName)) {
     }
 } else {
     Write-Host "Using provided ACR: $AcrName" -ForegroundColor Cyan
-    az acr show --name $AcrName --resource-group $ResourceGroup --output none 2>$null
-    if ($LASTEXITCODE -ne 0) {
+    $acrCheck = az acr list --resource-group $ResourceGroup --query "[?name=='$AcrName'].name" -o tsv
+    if ([string]::IsNullOrEmpty($acrCheck)) {
         Write-Host "ACR $AcrName does not exist. Creating..." -ForegroundColor Yellow
         az acr create --resource-group $ResourceGroup --name $AcrName --sku Basic --admin-enabled true --output none
         if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create ACR $AcrName"; exit 1 }
@@ -92,19 +92,73 @@ $cred = az acr credential show --name $AcrName --output json | ConvertFrom-Json
 $acrUsername = $cred.username
 $acrPassword = $cred.passwords[0].value
 
-# 7. Create/Update Container App Environment
+# 7. Create/Update Log Analytics Workspace
+$LogAnalyticsName = "$AppName-logs"
+Write-Host "Ensuring Log Analytics Workspace $LogAnalyticsName..." -ForegroundColor Green
+$existingWs = az monitor log-analytics workspace list --resource-group $ResourceGroup --query "[?name=='$LogAnalyticsName'].name" -o tsv
+if ([string]::IsNullOrEmpty($existingWs)) {
+    Write-Host "Creating Log Analytics Workspace..." -ForegroundColor Yellow
+    az monitor log-analytics workspace create --resource-group $ResourceGroup --workspace-name $LogAnalyticsName --location $Location --output none
+    if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create Log Analytics Workspace $LogAnalyticsName"; exit 1 }
+}
+
+$logsCustomerId = az monitor log-analytics workspace show --resource-group $ResourceGroup --workspace-name $LogAnalyticsName --query customerId --output tsv
+$logsKey        = az monitor log-analytics workspace get-shared-keys --resource-group $ResourceGroup --workspace-name $LogAnalyticsName --query primarySharedKey --output tsv
+
+# 8. Create/Update Container App Environment (with quota handling)
 $EnvName = "$AppName-env"
 Write-Host "Ensuring Container Apps Environment $EnvName..." -ForegroundColor Green
-az containerapp env create --name $EnvName --resource-group $ResourceGroup --location $Location --output none
-if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create Container Apps Environment $EnvName"; exit 1 }
+
+# Check if environment already exists across the subscription
+$existingEnvJson = az containerapp env list --query "[?name=='$EnvName']" -o json
+$existingEnv = $existingEnvJson | ConvertFrom-Json
+
+if ($existingEnv -and $existingEnv.Count -gt 0) {
+    $envLocation = $existingEnv[0].location
+    $envRg = $existingEnv[0].resourceGroup
+
+    # Normalize locations for comparison (Azure returns "East US", we use "eastus")
+    $normalizedEnvLocation = $envLocation.ToLower() -replace '\s', ''
+    $normalizedTargetLocation = $Location.ToLower() -replace '\s', ''
+
+    if ($normalizedEnvLocation -eq $normalizedTargetLocation -and $envRg -eq $ResourceGroup) {
+        Write-Host "Found existing environment $EnvName in $ResourceGroup ($envLocation). Reusing it." -ForegroundColor Cyan
+    } else {
+        Write-Warning "Environment $EnvName exists in $envRg ($envLocation), but you're deploying to $ResourceGroup ($Location)."
+        Write-Warning "Due to subscription quota limits (max 1 environment), you have two options:"
+        Write-Warning "  1. Delete the old environment and retry: az containerapp env delete --name $EnvName --resource-group $envRg -y"
+        Write-Warning "  2. Deploy to the existing location: .\deploy-to-aca.ps1 -Location '$envLocation' -ResourceGroup '$envRg'"
+        Write-Error "Cannot proceed - environment exists in a different region/resource group."
+        exit 1
+    }
+} else {
+    # Environment doesn't exist, try to create it
+    Write-Host "Creating new environment..." -ForegroundColor Yellow
+    az containerapp env create `
+        --name $EnvName `
+        --resource-group $ResourceGroup `
+        --location $Location `
+        --logs-workspace-id $logsCustomerId `
+        --logs-workspace-key $logsKey `
+        --output none
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to create Container Apps Environment. This may be due to subscription quota limits."
+        Write-Warning "List existing environments: az containerapp env list -o table"
+        exit 1
+    }
+}
 
 # Wait for provisioning
 Write-Host "Waiting for environment to be ready..." -ForegroundColor Yellow
 $timeoutSeconds = 180
 $elapsed = 0
 do {
-    $envStatus = az containerapp env show --name $EnvName --resource-group $ResourceGroup --query "properties.provisioningState" -o tsv
-    if ($envStatus -eq "Succeeded") { break }
+    $envStatus = az containerapp env show --name $EnvName --resource-group $ResourceGroup --query "properties.provisioningState" -o tsv 2>$null
+    if ($envStatus -eq "Succeeded") {
+        Write-Host "Environment is ready!" -ForegroundColor Green
+        break
+    }
 
     if ($elapsed -ge $timeoutSeconds) {
         Write-Error "Timeout waiting for environment provisioning."
@@ -116,7 +170,7 @@ do {
     Write-Host "  Status: $envStatus (waited ${elapsed}s)" -ForegroundColor Gray
 } while ($true)
 
-# 8. Deploy Container App
+# 9. Deploy Container App
 Write-Host "Deploying Container App $AppName..." -ForegroundColor Green
 az containerapp create `
     --name $AppName `
@@ -133,7 +187,7 @@ az containerapp create `
     --env-vars "ASPNETCORE_ENVIRONMENT=Production" `
     --query "properties.configuration.ingress.fqdn" -o tsv
 
-# 9. Final Output
+# 10. Final Output
 $url = az containerapp show --name $AppName --resource-group $ResourceGroup --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
 if (-not [string]::IsNullOrEmpty($url)) {
     Write-Host ""
