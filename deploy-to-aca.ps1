@@ -49,7 +49,7 @@ if ([string]::IsNullOrEmpty($AcrName)) {
     }
 } else {
     Write-Host "Using provided ACR: $AcrName" -ForegroundColor Cyan
-    $acrExists = az acr show --name $AcrName --resource-group $ResourceGroup --output none 2>$null
+    az acr show --name $AcrName --resource-group $ResourceGroup --output none 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host "ACR $AcrName does not exist. Creating..." -ForegroundColor Yellow
         az acr create --resource-group $ResourceGroup --name $AcrName --sku Basic --admin-enabled true --output none
