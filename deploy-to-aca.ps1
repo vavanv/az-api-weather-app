@@ -1,9 +1,10 @@
 # deploy-to-aca.ps1
 param (
-    [string]$ResourceGroup = "rg-weatherapi-prod-new",
+    [string]$ResourceGroup = "weather-rg",
     [string]$Location      = "eastus",
-    [string]$AppName       = "weatherapi",
-    [string]$AcrName       = ""
+    [string]$AppName       = "weather-api",
+    [string]$AcrName       = "arcforweatherapiweb",
+    [string]$EnvName       = "weatherapi-env"
 )
 
 $ErrorActionPreference = "Stop"
@@ -106,7 +107,7 @@ $logsCustomerId = az monitor log-analytics workspace show --resource-group $Reso
 $logsKey        = az monitor log-analytics workspace get-shared-keys --resource-group $ResourceGroup --workspace-name $LogAnalyticsName --query primarySharedKey --output tsv
 
 # 8. Create/Update Container App Environment (with quota handling)
-$EnvName = "$AppName-env"
+
 Write-Host "Ensuring Container Apps Environment $EnvName..." -ForegroundColor Green
 
 # Check if environment already exists across the subscription
