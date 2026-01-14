@@ -37,7 +37,7 @@ public class WeatherForecastController : ControllerBase
         {
             _logger.LogInformation("No forecasts found. Returning default Richmond Hill, Canada forecasts.");
             return Ok(new[]{
-                new WeatherForecast(DateOnly.FromDateTime(DateTime.Now), -5, "Freezing", "Richmond Hill, Canada"),
+                new WeatherForecast(DateOnly.FromDateTime(DateTime.Now), -5, "Freezing", "Richmond Hill, ON, Canada"),
                 new WeatherForecast(DateOnly.FromDateTime(DateTime.Now.AddDays(1)), 2, "Bracing", "Richmond Hill, ON, Canada"),
                 new WeatherForecast(DateOnly.FromDateTime(DateTime.Now.AddDays(2)), 8, "Chilly", "Richmond Hill, ON, Canada"),
                 new WeatherForecast(DateOnly.FromDateTime(DateTime.Now.AddDays(3)), 12, "Cool", "Richmond Hill, ON, Canada"),
